@@ -301,8 +301,9 @@ func (p *ReceiverEstimatedMaximumBitrate) String() string {
 	bitrate := p.Bitrate
 	powers := 0
 
-	// Keep dividing the bitrate until it's under 1000
-	for bitrate >= 1000.0 && powers < len(bitUnits) {
+	// Keep dividing the bitrate until it's under 1000, but never
+	// advance past the last unit in the table.
+	for bitrate >= 1000.0 && powers < len(bitUnits)-1 {
 		bitrate /= 1000.0
 		powers++
 	}
