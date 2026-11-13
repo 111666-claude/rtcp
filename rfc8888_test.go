@@ -6,6 +6,7 @@ package rtcp
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -482,4 +483,159 @@ func TestCCFeedbackReport_MarshalTooLarge(t *testing.T) {
 	bin, err := report.Marshal()
 	assert.ErrorIs(t, err, errPacketTooLarge)
 	assert.Nil(t, bin)
+}
+
+// TestCCFeedbackReport_MarshalBoundaries covers the small/edge packets that
+// must keep marshaling: no blocks, a single block, and a block whose odd number
+// of metric blocks is padded to a 4-byte boundary. The computed length, header
+// length field, alignment and a re-parse of the bytes must all agree.
+func TestCCFeedbackReport_MarshalBoundaries(t *testing.T) {
+	metric := func(n int) []CCFeedbackMetricBlock {
+		blocks := make([]CCFeedbackMetricBlock, n)
+		for i := range blocks {
+			blocks[i] = CCFeedbackMetricBlock{Received: true, ArrivalTimeOffset: uint16(i)}
+		}
+
+		return blocks
+	}
+
+	for _, test := range []struct {
+		name   string
+		report CCFeedbackReport
+	}{
+		{
+			name: "EmptyBlocks",
+			report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks:    []CCFeedbackReportBlock{},
+			},
+		},
+		{
+			name: "SingleBlock",
+			report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks: []CCFeedbackReportBlock{
+					{MediaSSRC: 7, BeginSequence: 100, MetricBlocks: metric(4)},
+				},
+			},
+		},
+		{
+			name: "OddMetricBlocksPadded",
+			report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks: []CCFeedbackReportBlock{
+					{MediaSSRC: 7, BeginSequence: 100, MetricBlocks: metric(3)},
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			size := test.report.MarshalSize()
+
+			buf, err := test.report.Marshal()
+			assert.NoError(t, err)
+			assert.NotNil(t, buf)
+
+			// Computed length matches the emitted bytes.
+			assert.Len(t, buf, size)
+			// Every RTCP packet is 32-bit aligned.
+			assert.Zero(t, size%4)
+			// The header length field is words-minus-one and matches the size.
+			assert.Equal(t, uint16(size/4-1), test.report.Header().Length)
+
+			// The bytes parse back into the same report.
+			parsed, err := Unmarshal(buf)
+			assert.NoError(t, err)
+			assert.Len(t, parsed, 1)
+			ccfb, ok := parsed[0].(*CCFeedbackReport)
+			assert.True(t, ok)
+			assert.Equal(t, test.report, *ccfb)
+		})
+	}
+}
+
+// TestCCFeedbackReport_ExactlyAtLimit marshals a packet whose size is exactly
+// the maximum representable in the RTCP length field and confirms it still
+// round-trips, while one metric block more is rejected with no partial output.
+func TestCCFeedbackReport_ExactlyAtLimit(t *testing.T) {
+	build := func(lastMetricBlocks int) CCFeedbackReport {
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 8),
+		}
+		for i := range 7 {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1),
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+		report.ReportBlocks[7] = CCFeedbackReportBlock{
+			MediaSSRC:    8,
+			MetricBlocks: make([]CCFeedbackMetricBlock, lastMetricBlocks),
+		}
+
+		return report
+	}
+
+	atLimit := build(16346)
+	assert.Equal(t, (math.MaxUint16+1)*4, atLimit.MarshalSize())
+
+	buf, err := atLimit.Marshal()
+	assert.NoError(t, err)
+	assert.Len(t, buf, (math.MaxUint16+1)*4)
+	assert.Equal(t, uint16(math.MaxUint16), atLimit.Header().Length)
+
+	parsed, err := Unmarshal(buf)
+	assert.NoError(t, err)
+	assert.Len(t, parsed, 1)
+	ccfb, ok := parsed[0].(*CCFeedbackReport)
+	assert.True(t, ok)
+	assert.Equal(t, atLimit, *ccfb)
+
+	// One metric block more (padded to a word) overflows the length field.
+	overLimit := build(16347)
+	assert.Greater(t, overLimit.MarshalSize(), (math.MaxUint16+1)*4)
+	bin, err := overLimit.Marshal()
+	assert.ErrorIs(t, err, errPacketTooLarge)
+	assert.Nil(t, bin)
+}
+
+// TestCCFeedbackReport_ManyBlocksLinear asserts that size accounting stays
+// linear and correct when many report blocks are present, including blocks
+// with odd metric counts.
+func TestCCFeedbackReport_ManyBlocksLinear(t *testing.T) {
+	const numBlocks = 200
+
+	report := CCFeedbackReport{
+		SenderSSRC:      1,
+		ReportTimestamp: 2,
+		ReportBlocks:    make([]CCFeedbackReportBlock, numBlocks),
+	}
+	expected := reportBlockOffset + reportTimestampLength
+	for i := range numBlocks {
+		// Alternate odd/even metric counts to exercise the per-block padding.
+		n := i%2 + 1
+		report.ReportBlocks[i] = CCFeedbackReportBlock{
+			MediaSSRC:    uint32(i + 1),
+			MetricBlocks: make([]CCFeedbackMetricBlock, n),
+		}
+		expected += report.ReportBlocks[i].len()
+	}
+
+	assert.Equal(t, expected, report.MarshalSize())
+	assert.Zero(t, expected%4)
+
+	buf, err := report.Marshal()
+	assert.NoError(t, err)
+	assert.Len(t, buf, expected)
+
+	parsed, err := Unmarshal(buf)
+	assert.NoError(t, err)
+	ccfb, ok := parsed[0].(*CCFeedbackReport)
+	assert.True(t, ok)
+	assert.Len(t, ccfb.ReportBlocks, numBlocks)
 }
