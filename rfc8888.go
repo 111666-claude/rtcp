@@ -140,6 +140,14 @@ func (b *CCFeedbackReport) Header() Header {
 
 // Marshal encodes the Congestion Control Feedback Report in binary.
 func (b CCFeedbackReport) Marshal() ([]byte, error) {
+	// The RTCP header length field is a uint16 counting 32-bit words minus
+	// one, so a packet larger than 4*(MaxUint16+1) bytes cannot be encoded.
+	// Reject it before allocating anything so no truncated result is produced.
+	marshalSize := b.MarshalSize()
+	if (marshalSize/4-1) > math.MaxUint16 || marshalSize < headerLength {
+		return nil, errPacketTooLarge
+	}
+
 	header := b.Header()
 	headerBuf, err := header.Marshal()
 	if err != nil {

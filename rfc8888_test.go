@@ -6,6 +6,7 @@ package rtcp
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -464,4 +465,186 @@ func TestCCFeedbackReportMarshalMaxLength(t *testing.T) {
 	assert.Len(t, buf, 4*(0xFFFF+1))
 	assert.Equal(t, []byte{0x8b, 0xcd, 0xff, 0xff}, buf[:4])
 	assert.Equal(t, []byte{0x00, 0x00, 0x00, 0x02}, buf[len(buf)-4:])
+}
+
+func TestCCFeedbackReport_MarshalTooLarge(t *testing.T) {
+	t.Run("EightFullReportBlocks", func(t *testing.T) {
+		// 8 report blocks, each one filled with the maximum number of metric
+		// blocks. The resulting packet cannot be described by the uint16 RTCP
+		// length field and must be rejected without producing partial bytes.
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 8),
+		}
+		for i := range 8 {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1),
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+
+		assert.Greater(t, report.MarshalSize()/4-1, math.MaxUint16)
+		bin, err := report.Marshal()
+		assert.ErrorIs(t, err, errPacketTooLarge)
+		assert.Nil(t, bin)
+	})
+
+	t.Run("TwoHundredBlocks", func(t *testing.T) {
+		// The overflow check must stay linear in the number of report blocks:
+		// a report with 200 blocks is rejected the same way as one with 8.
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 200),
+		}
+		for i := range report.ReportBlocks {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1),
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+
+		bin, err := report.Marshal()
+		assert.ErrorIs(t, err, errPacketTooLarge)
+		assert.Nil(t, bin)
+	})
+}
+
+func TestCCFeedbackReportMarshalBoundaries(t *testing.T) {
+	// Small and boundary-sized packets must keep the ordinary byte layout:
+	// the computed length, header length field, 4-byte alignment and a
+	// subsequent re-parse must all agree.
+	for _, test := range []struct {
+		Name   string
+		Report CCFeedbackReport
+	}{
+		{
+			Name: "EmptyBlocks",
+			Report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks:    []CCFeedbackReportBlock{},
+			},
+		},
+		{
+			Name: "SingleBlockWithoutMetrics",
+			Report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks: []CCFeedbackReportBlock{{
+					MediaSSRC: 1,
+				}},
+			},
+		},
+		{
+			Name: "SingleBlockWithOneMetric",
+			Report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks: []CCFeedbackReportBlock{{
+					MediaSSRC: 1,
+					MetricBlocks: []CCFeedbackMetricBlock{{
+						Received:          true,
+						ECN:               ECNCE,
+						ArrivalTimeOffset: 7,
+					}},
+				}},
+			},
+		},
+		{
+			Name: "SingleBlockWithOddMetrics",
+			Report: CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks: []CCFeedbackReportBlock{{
+					MediaSSRC: 3,
+					MetricBlocks: []CCFeedbackMetricBlock{
+						{Received: true, ArrivalTimeOffset: 1},
+						{Received: true, ArrivalTimeOffset: 2},
+						{Received: true, ArrivalTimeOffset: 3},
+					},
+				}},
+			},
+		},
+	} {
+		t.Run(test.Name, func(t *testing.T) {
+			size := test.Report.MarshalSize()
+			assert.Equal(t, size, test.Report.Len())
+			// Every report block ends on a 32-bit boundary, so the whole
+			// packet is always 4-byte aligned.
+			assert.Zero(t, size%4)
+
+			bin, err := test.Report.Marshal()
+			assert.NoError(t, err)
+			assert.Len(t, bin, size)
+
+			header := test.Report.Header()
+			assert.Equal(t, uint16(size/4-1), header.Length)
+			assert.Equal(t, size, 4*(int(header.Length)+1))
+			// The serialized header carries the same length field.
+			assert.Equal(t, bin[2:4], []byte{byte(header.Length >> 8), byte(header.Length)})
+
+			var decoded CCFeedbackReport
+			assert.NoError(t, decoded.Unmarshal(bin))
+			assert.Equal(t, test.Report, decoded)
+		})
+	}
+
+	t.Run("ExactlyAtLimit", func(t *testing.T) {
+		// A packet whose length field is exactly MaxUint16 still succeeds and
+		// round-trips; only packets strictly beyond the cap are rejected.
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 8),
+		}
+		for i := range 7 {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1),
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+		report.ReportBlocks[7] = CCFeedbackReportBlock{
+			MediaSSRC:    8,
+			MetricBlocks: make([]CCFeedbackMetricBlock, 16346),
+		}
+
+		size := report.MarshalSize()
+		assert.Equal(t, 4*(math.MaxUint16+1), size)
+		assert.Equal(t, math.MaxUint16, size/4-1)
+
+		bin, err := report.Marshal()
+		assert.NoError(t, err)
+		assert.Len(t, bin, size)
+
+		var decoded CCFeedbackReport
+		assert.NoError(t, decoded.Unmarshal(bin))
+		assert.Equal(t, report, decoded)
+	})
+
+	t.Run("OneByteBeyondLimit", func(t *testing.T) {
+		// The smallest oversized step above the cap must be rejected too. The
+		// layout only grows in 4-byte steps, so add the next possible block.
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 8),
+		}
+		for i := range 7 {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1),
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+		report.ReportBlocks[7] = CCFeedbackReportBlock{
+			MediaSSRC:    8,
+			MetricBlocks: make([]CCFeedbackMetricBlock, 16348),
+		}
+
+		assert.Greater(t, report.MarshalSize()/4-1, math.MaxUint16)
+		bin, err := report.Marshal()
+		assert.ErrorIs(t, err, errPacketTooLarge)
+		assert.Nil(t, bin)
+	})
 }
