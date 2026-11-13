@@ -128,3 +128,60 @@ func TestReceiverEstimatedMaximumBitrateOverflow(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(math.Float32frombits(0x62800000), packet.Bitrate)
 }
+
+// rembPacketBytes builds a raw REMB packet (no SSRCs) with the given
+// 6-bit exponent and 18-bit mantissa.
+func rembPacketBytes(exp, mantissa uint32) []byte {
+	return []byte{
+		143, 206, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 82, 69, 77, 66, 0,
+		byte(exp<<2) | byte(mantissa>>16), //nolint:gosec // test values are bounded
+		byte(mantissa >> 8),               //nolint:gosec // test values are bounded
+		byte(mantissa),                    //nolint:gosec // test values are bounded
+	}
+}
+
+func TestReceiverEstimatedMaximumBitrateString(t *testing.T) {
+	assert := assert.New(t)
+
+	// Exponent boundary cases, decoded through the binary path.
+	for _, test := range []struct {
+		name     string
+		exp      uint32
+		mantissa uint32
+		expected string
+	}{
+		{"Exp0", 0, 500, "ReceiverEstimatedMaximumBitrate 0 500.00 b/s"},
+		{"Exp1", 1, 750, "ReceiverEstimatedMaximumBitrate 0 1.50 Kb/s"},
+		{"Exp6", 6, 139487, "ReceiverEstimatedMaximumBitrate 0 8.93 Mb/s"},
+		{"Exp7", 7, 139487, "ReceiverEstimatedMaximumBitrate 0 17.85 Mb/s"},
+		// 128 * 2^63 = 1.1806e21: previously panicked with index out of range.
+		{"Exp63", 63, 128, "ReceiverEstimatedMaximumBitrate 0 1.18 Zb/s"},
+		// Largest encodable bitrate: mantissa and exponent both maxed out.
+		{"Exp63MaxMantissa", 63, 0x3FFFF, "ReceiverEstimatedMaximumBitrate 0 2.42 Yb/s"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet := ReceiverEstimatedMaximumBitrate{}
+			assert.NoError(packet.Unmarshal(rembPacketBytes(test.exp, test.mantissa)))
+			assert.Equal(test.expected, packet.String())
+		})
+	}
+
+	// Zero value must not divide or index anywhere.
+	packet := ReceiverEstimatedMaximumBitrate{}
+	assert.Equal("ReceiverEstimatedMaximumBitrate 0 0.00 b/s", packet.String())
+
+	// Absurdly large values must clamp to the last unit, not run off the table.
+	packet = ReceiverEstimatedMaximumBitrate{Bitrate: math.MaxFloat32}
+	assert.Contains(packet.String(), " Yb/s")
+
+	// Textification must not modify the packet, and must not affect
+	// a subsequent serialization of the same packet.
+	packet = ReceiverEstimatedMaximumBitrate{SenderSSRC: 1, Bitrate: 8927168.0, SSRCs: []uint32{1215622422}}
+	before, err := packet.Marshal()
+	assert.NoError(err)
+	_ = packet.String()
+	assert.Equal(float32(8927168.0), packet.Bitrate)
+	after, err := packet.Marshal()
+	assert.NoError(err)
+	assert.Equal(before, after)
+}

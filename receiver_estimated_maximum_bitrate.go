@@ -268,19 +268,21 @@ func (p *ReceiverEstimatedMaximumBitrate) Header() Header {
 // String prints the REMB packet in a human-readable format.
 func (p *ReceiverEstimatedMaximumBitrate) String() string {
 	// Keep a table of powers to units for fast conversion.
-	bitUnits := []string{"b", "Kb", "Mb", "Gb", "Tb", "Pb", "Eb"}
+	bitUnits := []string{"b", "Kb", "Mb", "Gb", "Tb", "Pb", "Eb", "Zb", "Yb"}
 
 	// Do some unit conversions because b/s is far too difficult to read.
+	// Work on a copy so the packet itself is never modified.
 	bitrate := p.Bitrate
 	powers := 0
 
-	// Keep dividing the bitrate until it's under 1000
-	for bitrate >= 1000.0 && powers < len(bitUnits) {
+	// Keep dividing the bitrate until it's under 1000, but never
+	// advance past the last unit in the table.
+	for bitrate >= 1000.0 && powers < len(bitUnits)-1 {
 		bitrate /= 1000.0
 		powers++
 	}
 
-	unit := bitUnits[powers] //nolint:gosec // powers is bounded by loop condition
+	unit := bitUnits[powers]
 
 	return fmt.Sprintf("ReceiverEstimatedMaximumBitrate %x %.2f %s/s", p.SenderSSRC, bitrate, unit)
 }
