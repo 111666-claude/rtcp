@@ -92,13 +92,20 @@ func (b CCFeedbackReport) DestinationSSRC() []uint32 {
 	return ssrcs
 }
 
-// Len returns the length of the report in bytes
-func (b *CCFeedbackReport) Len() uint16 {
-	n := uint16(0)
+// Len returns the length of the report in bytes. It is computed with native
+// (int) arithmetic so that reports larger than 65535 bytes cannot wrap, even
+// though the on-wire length fields are only 16 bits wide.
+func (b *CCFeedbackReport) Len() int {
+	n := 0
 	for _, block := range b.ReportBlocks {
 		n += block.len()
 	}
 	return reportBlockOffset + n + reportTimestampLength
+}
+
+// MarshalSize returns the size of the packet once marshaled.
+func (b *CCFeedbackReport) MarshalSize() int {
+	return b.Len()
 }
 
 // Header returns the Header associated with this packet.
@@ -107,28 +114,34 @@ func (b *CCFeedbackReport) Header() Header {
 		Padding: false,
 		Count:   FormatCCFB,
 		Type:    TypeTransportSpecificFeedback,
-		Length:  b.Len()/4 - 1,
+		Length:  uint16(b.Len()/4 - 1),
 	}
 }
 
 // Marshal encodes the Congestion Control Feedback Report in binary
 func (b CCFeedbackReport) Marshal() ([]byte, error) {
+	length := b.Len()
+	// The RTCP header length field is 16 bits and holds the packet length in
+	// 32-bit words minus one, so a packet must fit in 2^18 bytes.
+	if length < 4 || length%4 != 0 || length/4-1 > math.MaxUint16 {
+		return nil, errBadLength
+	}
+
 	header := b.Header()
 	headerBuf, err := header.Marshal()
 	if err != nil {
 		return nil, err
 	}
-	length := 4 * (header.Length + 1)
 	buf := make([]byte, length)
 	copy(buf[:headerLength], headerBuf)
 	binary.BigEndian.PutUint32(buf[headerLength:], b.SenderSSRC)
-	offset := uint16(reportBlockOffset)
+	offset := reportBlockOffset
 	for _, block := range b.ReportBlocks {
-		b, err := block.marshal()
+		blockBuf, err := block.marshal()
 		if err != nil {
 			return nil, err
 		}
-		copy(buf[offset:], b)
+		copy(buf[offset:], blockBuf)
 		offset += block.len()
 	}
 
@@ -150,6 +163,13 @@ func (b CCFeedbackReport) String() string {
 
 // Unmarshal decodes the Congestion Control Feedback Report from binary
 func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
+	// Clear any state inherited from a previous packet up front. Parsing then
+	// proceeds into local variables and is committed only once the whole packet
+	// validates, so a failed parse can never expose partial ReportBlocks.
+	b.SenderSSRC = 0
+	b.ReportTimestamp = 0
+	b.ReportBlocks = []CCFeedbackReportBlock{}
+
 	if len(rawPacket) < headerLength+ssrcLength+reportTimestampLength {
 		return errPacketTooShort
 	}
@@ -162,22 +182,29 @@ func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
 		return errWrongType
 	}
 
-	b.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
+	senderSSRC := binary.BigEndian.Uint32(rawPacket[headerLength:])
 
-	reportTimestampOffset := uint16(len(rawPacket) - reportTimestampLength)
-	b.ReportTimestamp = binary.BigEndian.Uint32(rawPacket[reportTimestampOffset:])
+	reportTimestampOffset := len(rawPacket) - reportTimestampLength
+	reportTimestamp := binary.BigEndian.Uint32(rawPacket[reportTimestampOffset:])
 
-	offset := uint16(reportBlockOffset)
-	b.ReportBlocks = []CCFeedbackReportBlock{}
+	reportBlocks := []CCFeedbackReportBlock{}
+	offset := reportBlockOffset
 	for offset < reportTimestampOffset {
 		var block CCFeedbackReportBlock
-		if err := block.unmarshal(rawPacket[offset:]); err != nil {
+		if err := block.unmarshal(rawPacket[offset:reportTimestampOffset]); err != nil {
 			return err
 		}
-		b.ReportBlocks = append(b.ReportBlocks, block)
-		offset += block.len()
+		blockLength := block.len()
+		if blockLength <= 0 || offset+blockLength > reportTimestampOffset {
+			return errIncorrectNumReports
+		}
+		reportBlocks = append(reportBlocks, block)
+		offset += blockLength
 	}
 
+	b.SenderSSRC = senderSSRC
+	b.ReportTimestamp = reportTimestamp
+	b.ReportBlocks = reportBlocks
 	return nil
 }
 
@@ -198,13 +225,15 @@ type CCFeedbackReportBlock struct {
 	MetricBlocks  []CCFeedbackMetricBlock
 }
 
-// len returns the length of the report block in bytes
-func (b *CCFeedbackReportBlock) len() uint16 {
+// len returns the length of the report block in bytes. It is computed with
+// native (int) arithmetic; the 16-bit num_reports field is only converted when
+// the block header is written in marshal.
+func (b *CCFeedbackReportBlock) len() int {
 	n := len(b.MetricBlocks)
 	if n%2 != 0 {
 		n++
 	}
-	return reportsOffset + 2*uint16(n)
+	return reportsOffset + 2*n
 }
 
 func (b CCFeedbackReportBlock) String() string {
@@ -228,19 +257,19 @@ func (b CCFeedbackReportBlock) marshal() ([]byte, error) {
 	binary.BigEndian.PutUint32(buf[ssrcOffset:], b.MediaSSRC)
 	binary.BigEndian.PutUint16(buf[beginSequenceOffset:], b.BeginSequence)
 
-	length := uint16(len(b.MetricBlocks))
-	if length > 0 {
-		length--
+	// num_reports is a 16-bit wire field: convert only when writing the header.
+	numReportsField := uint16(0)
+	if len(b.MetricBlocks) > 0 {
+		numReportsField = uint16(len(b.MetricBlocks) - 1)
 	}
-
-	binary.BigEndian.PutUint16(buf[numReportsOffset:], length)
+	binary.BigEndian.PutUint16(buf[numReportsOffset:], numReportsField)
 
 	for i, block := range b.MetricBlocks {
-		b, err := block.marshal()
+		metricBlock, err := block.marshal()
 		if err != nil {
 			return nil, err
 		}
-		copy(buf[reportsOffset+i*2:], b)
+		copy(buf[reportsOffset+2*i:], metricBlock)
 	}
 
 	return buf, nil
@@ -248,31 +277,40 @@ func (b CCFeedbackReportBlock) marshal() ([]byte, error) {
 
 // Unmarshal decodes the Congestion Control Feedback Report Block from binary
 func (b *CCFeedbackReportBlock) unmarshal(rawPacket []byte) error {
+	// Reset state so reusing a block for the next packet cannot inherit
+	// MetricBlocks from a previous parse.
+	b.MediaSSRC = 0
+	b.BeginSequence = 0
+	b.MetricBlocks = nil
+
 	if len(rawPacket) < reportsOffset {
 		return errReportBlockLength
 	}
 	b.MediaSSRC = binary.BigEndian.Uint32(rawPacket[:beginSequenceOffset])
 	b.BeginSequence = binary.BigEndian.Uint16(rawPacket[beginSequenceOffset:numReportsOffset])
-	numReportsField := binary.BigEndian.Uint16(rawPacket[numReportsOffset:])
+	numReportsField := int(binary.BigEndian.Uint16(rawPacket[numReportsOffset:]))
 	if numReportsField == 0 {
 		return nil
 	}
 
-	if int(b.BeginSequence)+int(numReportsField) > math.MaxUint16 {
+	// Keep the sequence arithmetic in native int width so the 16-bit wire
+	// values cannot wrap. The encoded range must stay inside the uint16
+	// sequence space.
+	if int(b.BeginSequence)+numReportsField > math.MaxUint16 {
 		return errIncorrectNumReports
 	}
+	numReports := numReportsField + 1
 
-	endSequence := b.BeginSequence + numReportsField
-	numReports := endSequence - b.BeginSequence + 1
-
-	if len(rawPacket) < reportsOffset+int(numReports)*2 {
+	// Validate against the remaining input before allocating, so a hostile
+	// num_reports can never trigger an unbounded allocation.
+	if len(rawPacket) < reportsOffset+2*numReports {
 		return errIncorrectNumReports
 	}
 	b.MetricBlocks = make([]CCFeedbackMetricBlock, numReports)
-	for i := uint16(0); i < numReports; i++ {
+	for i := 0; i < numReports; i++ {
 		var mb CCFeedbackMetricBlock
 		offset := reportsOffset + 2*i
-		if err := mb.unmarshal(rawPacket[offset : offset+2]); err != nil {
+		if err := mb.unmarshal(rawPacket[offset : offset+metricBlockLength]); err != nil {
 			return err
 		}
 		b.MetricBlocks[i] = mb
