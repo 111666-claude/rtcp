@@ -4,6 +4,7 @@
 package rtcp
 
 import (
+	"encoding/binary"
 	"fmt"
 	"testing"
 
@@ -395,4 +396,150 @@ func TestCCFeedbackReportUnmarshalMarshal(t *testing.T) {
 			assert.Equal(t, test.Data, buf)
 		})
 	}
+}
+
+// buildCCFBPacket builds a wire-format CCFB packet holding a single report
+// block with numReportsField in the num_reports field and that many zero
+// metric blocks (plus even-alignment padding). A negative metricBlockCount
+// omits the metric blocks entirely (truncated packet).
+func buildCCFBPacket(numReportsField uint16, beginSeq uint16, metricBlockCount int) []byte {
+	blockLen := reportsOffset
+	if metricBlockCount >= 0 {
+		blockLen += metricBlockCount * metricBlockLength
+		if metricBlockCount%2 != 0 {
+			blockLen += metricBlockLength
+		}
+	}
+	total := reportBlockOffset + blockLen + reportTimestampLength
+	buf := make([]byte, total)
+	buf[0] = 0x80 | FormatCCFB // V=2, FMT=11
+	buf[1] = uint8(TypeTransportSpecificFeedback)
+	binary.BigEndian.PutUint16(buf[2:], uint16(total/4-1))
+	binary.BigEndian.PutUint32(buf[headerLength:], 1)      // Sender SSRC
+	binary.BigEndian.PutUint32(buf[reportBlockOffset:], 1) // Media SSRC
+	binary.BigEndian.PutUint16(buf[reportBlockOffset+beginSequenceOffset:], beginSeq)
+	binary.BigEndian.PutUint16(buf[reportBlockOffset+numReportsOffset:], numReportsField)
+	binary.BigEndian.PutUint32(buf[total-reportTimestampLength:], 1) // Report Timestamp
+	return buf
+}
+
+func TestCCFeedbackReportUnmarshalNearUint16Boundary(t *testing.T) {
+	// num_reports=0x7ffb: 32764 metric blocks, block is exactly 65536 bytes.
+	// Every 16-bit offset/length computation would wrap here.
+	const numReportsField = 0x7ffb
+	const numReports = numReportsField + 1
+	data := buildCCFBPacket(numReportsField, 0, numReports)
+
+	pkts, err := Unmarshal(data)
+	assert.NoError(t, err)
+	assert.Len(t, pkts, 1)
+	report, ok := pkts[0].(*CCFeedbackReport)
+	assert.True(t, ok)
+	assert.Len(t, report.ReportBlocks, 1)
+	assert.Len(t, report.ReportBlocks[0].MetricBlocks, numReports)
+
+	// Length accounting must agree with the actual buffer size even though
+	// the packet is larger than 0xffff bytes.
+	assert.Equal(t, len(data), report.Len())
+	assert.Equal(t, len(data), report.MarshalSize())
+	assert.Equal(t, uint16(len(data)/4-1), report.Header().Length)
+
+	// The same packet truncated by two bytes (one missing metric block)
+	// must fail with the existing error family, not wrap or panic.
+	var report2 CCFeedbackReport
+	err = report2.Unmarshal(data[:len(data)-reportTimestampLength-metricBlockLength])
+	assert.ErrorIs(t, err, errIncorrectNumReports)
+	assert.Empty(t, report2.ReportBlocks)
+}
+
+func TestCCFeedbackReportBlockUnmarshalUint16Boundary(t *testing.T) {
+	// num_reports=0xffff with begin_seq=0: report count is 65536, which
+	// wraps a uint16 loop counter to zero.
+	t.Run("maxNumReportsTruncated", func(t *testing.T) {
+		var block CCFeedbackReportBlock
+		data := make([]byte, reportsOffset)
+		binary.BigEndian.PutUint16(data[numReportsOffset:], 0xffff)
+		err := block.unmarshal(data)
+		assert.ErrorIs(t, err, errIncorrectNumReports)
+		assert.Nil(t, block.MetricBlocks)
+	})
+
+	t.Run("maxNumReportsComplete", func(t *testing.T) {
+		const numReports = 0x10000 // 0xffff + 1
+		data := make([]byte, reportsOffset+numReports*metricBlockLength)
+		binary.BigEndian.PutUint16(data[numReportsOffset:], 0xffff)
+		var block CCFeedbackReportBlock
+		err := block.unmarshal(data)
+		assert.NoError(t, err)
+		assert.Len(t, block.MetricBlocks, numReports)
+		assert.Equal(t, len(data), block.len())
+	})
+
+	// begin_seq + num_reports must not overflow the sequence space.
+	t.Run("endSequenceOverflow", func(t *testing.T) {
+		var block CCFeedbackReportBlock
+		data := make([]byte, reportsOffset)
+		binary.BigEndian.PutUint16(data[beginSequenceOffset:], 0x8000)
+		binary.BigEndian.PutUint16(data[numReportsOffset:], 0x8000)
+		err := block.unmarshal(data)
+		assert.ErrorIs(t, err, errIncorrectNumReports)
+	})
+}
+
+func TestCCFeedbackReportUnmarshalNoPartialState(t *testing.T) {
+	good := buildCCFBPacket(3, 0, 4) // num_reports=3 -> 4 metric blocks
+
+	var report CCFeedbackReport
+	assert.NoError(t, report.Unmarshal(good))
+	assert.Len(t, report.ReportBlocks, 1)
+	prevBlocks := report.ReportBlocks
+
+	// A failing parse must not leave partially decoded blocks behind and
+	// must not clobber previously decoded state.
+	broken := buildCCFBPacket(0x7ffb, 0, 10) // claims 32764 reports, has 10
+	err := report.Unmarshal(broken)
+	assert.ErrorIs(t, err, errIncorrectNumReports)
+	assert.Equal(t, prevBlocks, report.ReportBlocks)
+
+	// Reusing the same object for the next packet must not inherit state.
+	empty := buildCCFBPacket(0, 0, 0)
+	assert.NoError(t, report.Unmarshal(empty))
+	assert.Len(t, report.ReportBlocks, 1)
+	assert.Empty(t, report.ReportBlocks[0].MetricBlocks)
+}
+
+func TestCCFeedbackReportUnmarshalOddBlockAlignment(t *testing.T) {
+	// Report blocks are padded to an even number of metric blocks. A block
+	// whose padding would overlap the report timestamp must be rejected.
+	data := buildCCFBPacket(2, 0, 3) // 3 metric blocks + 2 bytes padding
+	// Drop the padding: header length and timestamp move 2 bytes earlier.
+	truncated := make([]byte, 0, len(data)-metricBlockLength)
+	truncated = append(truncated, data[:len(data)-metricBlockLength-reportTimestampLength]...)
+	truncated = append(truncated, data[len(data)-reportTimestampLength:]...)
+	binary.BigEndian.PutUint16(truncated[2:], uint16(len(truncated)/4-1))
+
+	var report CCFeedbackReport
+	err := report.Unmarshal(truncated)
+	assert.ErrorIs(t, err, errIncorrectNumReports)
+	assert.Empty(t, report.ReportBlocks)
+}
+
+func FuzzCCFeedbackReportUnmarshal(f *testing.F) {
+	// Seeds near the 16-bit boundary of num_reports.
+	for _, numReports := range []uint16{0, 1, 2, 0x7ffa, 0x7ffb, 0xfffe, 0xffff} {
+		f.Add(buildCCFBPacket(numReports, 0, -1))                     // header only, no metric blocks
+		f.Add(buildCCFBPacket(numReports, 0, int(numReports)))        // one metric block short
+		f.Add(buildCCFBPacket(numReports, 0, int(numReports)+1))      // complete
+		f.Add(buildCCFBPacket(numReports, 0x7fff, int(numReports)+1)) // begin_seq at boundary
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var report CCFeedbackReport
+		if err := report.Unmarshal(data); err != nil {
+			return
+		}
+		// Anything that parses must have consistent length accounting.
+		assert.Equal(t, len(data), report.Len())
+		assert.Equal(t, len(data), report.MarshalSize())
+		assert.Equal(t, uint16(len(data)/4-1), report.Header().Length)
+	})
 }

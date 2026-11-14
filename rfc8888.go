@@ -93,12 +93,17 @@ func (b CCFeedbackReport) DestinationSSRC() []uint32 {
 }
 
 // Len returns the length of the report in bytes
-func (b *CCFeedbackReport) Len() uint16 {
-	n := uint16(0)
+func (b *CCFeedbackReport) Len() int {
+	n := 0
 	for _, block := range b.ReportBlocks {
 		n += block.len()
 	}
 	return reportBlockOffset + n + reportTimestampLength
+}
+
+// MarshalSize returns the size of the packet when marshaled.
+func (b *CCFeedbackReport) MarshalSize() int {
+	return b.Len()
 }
 
 // Header returns the Header associated with this packet.
@@ -107,7 +112,7 @@ func (b *CCFeedbackReport) Header() Header {
 		Padding: false,
 		Count:   FormatCCFB,
 		Type:    TypeTransportSpecificFeedback,
-		Length:  b.Len()/4 - 1,
+		Length:  uint16(b.Len()/4 - 1),
 	}
 }
 
@@ -118,11 +123,11 @@ func (b CCFeedbackReport) Marshal() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	length := 4 * (header.Length + 1)
+	length := b.Len()
 	buf := make([]byte, length)
 	copy(buf[:headerLength], headerBuf)
 	binary.BigEndian.PutUint32(buf[headerLength:], b.SenderSSRC)
-	offset := uint16(reportBlockOffset)
+	offset := reportBlockOffset
 	for _, block := range b.ReportBlocks {
 		b, err := block.marshal()
 		if err != nil {
@@ -162,21 +167,32 @@ func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
 		return errWrongType
 	}
 
-	b.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
+	senderSSRC := binary.BigEndian.Uint32(rawPacket[headerLength:])
 
-	reportTimestampOffset := uint16(len(rawPacket) - reportTimestampLength)
-	b.ReportTimestamp = binary.BigEndian.Uint32(rawPacket[reportTimestampOffset:])
+	reportTimestampOffset := len(rawPacket) - reportTimestampLength
+	reportTimestamp := binary.BigEndian.Uint32(rawPacket[reportTimestampOffset:])
 
-	offset := uint16(reportBlockOffset)
-	b.ReportBlocks = []CCFeedbackReportBlock{}
+	// Decode into local state first so a failed parse leaves the
+	// receiver untouched instead of holding partially decoded blocks.
+	offset := reportBlockOffset
+	reportBlocks := []CCFeedbackReportBlock{}
 	for offset < reportTimestampOffset {
 		var block CCFeedbackReportBlock
-		if err := block.unmarshal(rawPacket[offset:]); err != nil {
+		if err := block.unmarshal(rawPacket[offset:reportTimestampOffset]); err != nil {
 			return err
 		}
-		b.ReportBlocks = append(b.ReportBlocks, block)
 		offset += block.len()
+		if offset > reportTimestampOffset {
+			// The block (including its even-alignment padding) extends
+			// into the report timestamp.
+			return errIncorrectNumReports
+		}
+		reportBlocks = append(reportBlocks, block)
 	}
+
+	b.SenderSSRC = senderSSRC
+	b.ReportTimestamp = reportTimestamp
+	b.ReportBlocks = reportBlocks
 
 	return nil
 }
@@ -199,12 +215,12 @@ type CCFeedbackReportBlock struct {
 }
 
 // len returns the length of the report block in bytes
-func (b *CCFeedbackReportBlock) len() uint16 {
+func (b *CCFeedbackReportBlock) len() int {
 	n := len(b.MetricBlocks)
 	if n%2 != 0 {
 		n++
 	}
-	return reportsOffset + 2*uint16(n)
+	return reportsOffset + 2*n
 }
 
 func (b CCFeedbackReportBlock) String() string {
@@ -251,32 +267,38 @@ func (b *CCFeedbackReportBlock) unmarshal(rawPacket []byte) error {
 	if len(rawPacket) < reportsOffset {
 		return errReportBlockLength
 	}
-	b.MediaSSRC = binary.BigEndian.Uint32(rawPacket[:beginSequenceOffset])
-	b.BeginSequence = binary.BigEndian.Uint16(rawPacket[beginSequenceOffset:numReportsOffset])
+	mediaSSRC := binary.BigEndian.Uint32(rawPacket[:beginSequenceOffset])
+	beginSequence := binary.BigEndian.Uint16(rawPacket[beginSequenceOffset:numReportsOffset])
 	numReportsField := binary.BigEndian.Uint16(rawPacket[numReportsOffset:])
 	if numReportsField == 0 {
+		b.MediaSSRC = mediaSSRC
+		b.BeginSequence = beginSequence
+		b.MetricBlocks = nil
 		return nil
 	}
 
-	if int(b.BeginSequence)+int(numReportsField) > math.MaxUint16 {
+	if int(beginSequence)+int(numReportsField) > math.MaxUint16 {
 		return errIncorrectNumReports
 	}
 
-	endSequence := b.BeginSequence + numReportsField
-	numReports := endSequence - b.BeginSequence + 1
+	// num_reports on the wire is the report count minus one; compute the
+	// count in int so values near 0xffff cannot wrap a 16-bit index.
+	numReports := int(numReportsField) + 1
 
-	if len(rawPacket) < reportsOffset+int(numReports)*2 {
+	if len(rawPacket) < reportsOffset+numReports*metricBlockLength {
 		return errIncorrectNumReports
 	}
-	b.MetricBlocks = make([]CCFeedbackMetricBlock, numReports)
-	for i := uint16(0); i < numReports; i++ {
-		var mb CCFeedbackMetricBlock
-		offset := reportsOffset + 2*i
-		if err := mb.unmarshal(rawPacket[offset : offset+2]); err != nil {
+	metricBlocks := make([]CCFeedbackMetricBlock, numReports)
+	for i := 0; i < numReports; i++ {
+		offset := reportsOffset + i*metricBlockLength
+		if err := metricBlocks[i].unmarshal(rawPacket[offset : offset+metricBlockLength]); err != nil {
 			return err
 		}
-		b.MetricBlocks[i] = mb
 	}
+
+	b.MediaSSRC = mediaSSRC
+	b.BeginSequence = beginSequence
+	b.MetricBlocks = metricBlocks
 	return nil
 }
 
