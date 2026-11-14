@@ -6,6 +6,7 @@ package rtcp
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -464,4 +465,149 @@ func TestCCFeedbackReportMarshalMaxLength(t *testing.T) {
 	assert.Len(t, buf, 4*(0xFFFF+1))
 	assert.Equal(t, []byte{0x8b, 0xcd, 0xff, 0xff}, buf[:4])
 	assert.Equal(t, []byte{0x00, 0x00, 0x00, 0x02}, buf[len(buf)-4:])
+}
+
+func TestCCFeedbackReportMarshalTooLarge(t *testing.T) {
+	t.Run("EightFullReportBlocks", func(t *testing.T) {
+		// 8 report blocks, each filled with the maximum number of metric
+		// blocks. The resulting packet cannot be described by the uint16 RTCP
+		// length field and must be rejected without producing partial bytes.
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 8),
+		}
+		for i := range report.ReportBlocks {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1), //nolint:gosec // G115
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+
+		assert.Greater(t, report.MarshalSize(), (math.MaxUint16+1)*4)
+
+		bin, err := report.Marshal()
+		assert.ErrorIs(t, err, errPacketTooLarge)
+		assert.Nil(t, bin)
+	})
+
+	t.Run("TwoHundredBlocks", func(t *testing.T) {
+		// The overflow check is a single linear pass over the blocks; a report
+		// with 200 blocks must be rejected just like one with 8.
+		report := CCFeedbackReport{
+			SenderSSRC:      1,
+			ReportTimestamp: 2,
+			ReportBlocks:    make([]CCFeedbackReportBlock, 200),
+		}
+		for i := range report.ReportBlocks {
+			report.ReportBlocks[i] = CCFeedbackReportBlock{
+				MediaSSRC:    uint32(i + 1), //nolint:gosec // G115
+				MetricBlocks: make([]CCFeedbackMetricBlock, maxMetricBlocks),
+			}
+		}
+
+		bin, err := report.Marshal()
+		assert.ErrorIs(t, err, errPacketTooLarge)
+		assert.Nil(t, bin)
+	})
+}
+
+func TestCCFeedbackReportMarshalBoundaries(t *testing.T) {
+	reportBlock := func(metricBlocks int) CCFeedbackReportBlock {
+		return CCFeedbackReportBlock{
+			MediaSSRC:     1,
+			BeginSequence: 2,
+			MetricBlocks:  make([]CCFeedbackMetricBlock, metricBlocks),
+		}
+	}
+
+	for _, test := range []struct {
+		Name         string
+		ReportBlocks []CCFeedbackReportBlock
+	}{
+		{
+			Name:         "EmptyBlocks",
+			ReportBlocks: []CCFeedbackReportBlock{},
+		},
+		{
+			Name:         "NilBlocks",
+			ReportBlocks: nil,
+		},
+		{
+			Name:         "SingleEmptyBlock",
+			ReportBlocks: []CCFeedbackReportBlock{reportBlock(0)},
+		},
+		{
+			Name:         "SingleOddBlock",
+			ReportBlocks: []CCFeedbackReportBlock{reportBlock(1)},
+		},
+		{
+			Name:         "SingleFullBlock",
+			ReportBlocks: []CCFeedbackReportBlock{reportBlock(maxMetricBlocks)},
+		},
+		{
+			Name: "ExactlyAtLengthLimit",
+			ReportBlocks: func() []CCFeedbackReportBlock {
+				// 8 blocks: 7 full blocks plus the number of metric blocks
+				// that makes the packet exactly 4*(MaxUint16+1) bytes.
+				blocks := make([]CCFeedbackReportBlock, 8)
+				for i := range 7 {
+					blocks[i] = reportBlock(maxMetricBlocks)
+				}
+				blocks[7] = reportBlock(16346)
+
+				return blocks
+			}(),
+		},
+	} {
+		t.Run(test.Name, func(t *testing.T) {
+			report := CCFeedbackReport{
+				SenderSSRC:      1,
+				ReportTimestamp: 2,
+				ReportBlocks:    test.ReportBlocks,
+			}
+
+			bin, err := report.Marshal()
+			assert.NoError(t, err)
+			assert.NotNil(t, bin)
+
+			// Computed length, actual length, header length field and
+			// 4-byte alignment must all agree.
+			assert.Len(t, bin, report.MarshalSize())
+			assert.Len(t, bin, report.Len())
+			assert.Zero(t, len(bin)%4)
+
+			var header Header
+			assert.NoError(t, header.Unmarshal(bin))
+			assert.Equal(t, uint16(len(bin)/4-1), header.Length) //nolint:gosec // G115
+			assert.Equal(t, uint8(FormatCCFB), header.Count)
+			assert.Equal(t, TypeTransportSpecificFeedback, header.Type)
+
+			// Re-parsing must yield the same report. A nil and an empty slice
+			// have the same wire encoding, so they are equivalent here.
+			var decoded CCFeedbackReport
+			assert.NoError(t, decoded.Unmarshal(bin))
+			assert.Equal(t, normalizeCCFB(report), normalizeCCFB(decoded))
+
+			pkts, err := Unmarshal(bin)
+			assert.NoError(t, err)
+			assert.Len(t, pkts, 1)
+			unmarshaled, ok := pkts[0].(*CCFeedbackReport)
+			assert.True(t, ok)
+			assert.Equal(t, normalizeCCFB(report), normalizeCCFB(*unmarshaled))
+		})
+	}
+}
+
+func normalizeCCFB(report CCFeedbackReport) CCFeedbackReport {
+	if len(report.ReportBlocks) == 0 {
+		report.ReportBlocks = nil
+	}
+	for i := range report.ReportBlocks {
+		if len(report.ReportBlocks[i].MetricBlocks) == 0 {
+			report.ReportBlocks[i].MetricBlocks = nil
+		}
+	}
+
+	return report
 }
