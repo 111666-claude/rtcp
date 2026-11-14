@@ -1,6 +1,7 @@
 package rtcp
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -864,5 +865,164 @@ func TestTransportLayerCC_Marshal(t *testing.T) {
 		if got, want := bin, test.Want; !reflect.DeepEqual(got, want) {
 			t.Fatalf("Marshal %q : got = %v, want %v", test.Name, got, want)
 		}
+	}
+}
+
+func TestTransportLayerCC_Unmarshal32BytePacket(t *testing.T) {
+	// 0xaf: padding set, FMT=15. Length 7 => 32 bytes.
+	// 9 statuses: one two-bit status vector chunk (5 received small delta,
+	// 1 not received, 1 large delta) plus an unused run-length chunk that
+	// must not contribute more statuses, then six recv deltas.
+	data := []byte{
+		0xaf, 0xcd, 0x0, 0x7,
+		0x9b, 0x74, 0xf6, 0x1f,
+		0x93, 0x71, 0xdc, 0xbc,
+		0x85, 0x3c, 0x0, 0x9,
+		0x63, 0xf9, 0x16, 0xb3,
+		0xd5, 0x52, 0x0, 0x30,
+		0x9b, 0xaa, 0x6a, 0xaa,
+		0x7b, 0x1, 0x9, 0x1,
+	}
+	var packet TransportLayerCC
+	if err := packet.Unmarshal(data); err != nil {
+		t.Fatalf("Unmarshal err: %v", err)
+	}
+	if got, want := packet.PacketStatusCount, uint16(9); got != want {
+		t.Fatalf("PacketStatusCount: got = %v, want %v", got, want)
+	}
+	if got, want := len(packet.PacketChunks), 2; got != want {
+		t.Fatalf("PacketChunks: got = %v, want %v", got, want)
+	}
+	if got, want := len(packet.RecvDeltas), 6; got != want {
+		t.Fatalf("RecvDeltas: got = %v, want %v", got, want)
+	}
+	if got, want := packet.RecvDeltas[0].Delta, int64(38750); got != want {
+		t.Fatalf("first delta: got = %v, want %v", got, want)
+	}
+	if got, want := packet.RecvDeltas[5].Delta, int64(66250); got != want {
+		t.Fatalf("last delta: got = %v, want %v", got, want)
+	}
+}
+
+func TestTransportLayerCC_StatusVectorChunkTooManySymbols(t *testing.T) {
+	// 14 bits are available for the symbol list: 14 one-bit symbols or
+	// 7 two-bit symbols. Anything more must be rejected instead of silently
+	// truncated to 0x5555.
+	for _, test := range []struct {
+		SymbolSize uint16
+		Symbols    []uint16
+	}{
+		{TypeTCCSymbolSizeOneBit, make([]uint16, 15)},
+		{TypeTCCSymbolSizeTwoBit, make([]uint16, 8)},
+	} {
+		chunk := StatusVectorChunk{
+			Type:       TypeTCCStatusVectorChunk,
+			SymbolSize: test.SymbolSize,
+			SymbolList: test.Symbols,
+		}
+		if _, err := chunk.Marshal(); !errors.Is(err, errInvalidSizeOrStartIndex) {
+			t.Fatalf("Marshal with %d symbols of size %d: got err = %v, want %v",
+				len(test.Symbols), test.SymbolSize, err, errInvalidSizeOrStartIndex)
+		}
+	}
+}
+
+func TestTransportLayerCC_Unmarshal1024Statuses(t *testing.T) {
+	// 1024 consecutive "not received" statuses are a single run-length chunk.
+	// The 24 byte packet must decode completely and must not invent deltas.
+	data := []byte{
+		0xaf, 0xcd, 0x0, 0x5,
+		0xfa, 0x17, 0xfa, 0x17,
+		0x0, 0x0, 0x0, 0x0,
+		0x0, 0x0, 0x4, 0x0,
+		0x0, 0x0, 0x0, 0x0,
+		0x4, 0x0, 0x0, 0x2,
+	}
+	var packet TransportLayerCC
+	if err := packet.Unmarshal(data); err != nil {
+		t.Fatalf("Unmarshal err: %v", err)
+	}
+	if got, want := packet.PacketStatusCount, uint16(1024); got != want {
+		t.Fatalf("PacketStatusCount: got = %v, want %v", got, want)
+	}
+	if got, want := len(packet.PacketChunks), 1; got != want {
+		t.Fatalf("PacketChunks: got = %v, want %v", got, want)
+	}
+	chunk, ok := packet.PacketChunks[0].(*RunLengthChunk)
+	if !ok {
+		t.Fatalf("PacketChunks[0]: got = %T, want *RunLengthChunk", packet.PacketChunks[0])
+	}
+	if got, want := chunk.RunLength, uint16(1024); got != want {
+		t.Fatalf("RunLength: got = %v, want %v", got, want)
+	}
+	if got := len(packet.RecvDeltas); got != 0 {
+		t.Fatalf("RecvDeltas: got = %v, want 0", got)
+	}
+}
+
+func TestTransportLayerCC_UnmarshalRunLengthNotReceivedAdvances(t *testing.T) {
+	// A run-length chunk of "not received" statuses must still consume its
+	// statuses so a following chunk is parsed instead of the packet being
+	// rejected as too short.
+	data := []byte{
+		0xaf, 0xcd, 0x0, 0x6,
+		0xfa, 0x17, 0xfa, 0x17,
+		0x0, 0x0, 0x0, 0x0,
+		0x0, 0x0, 0x4, 0x2,
+		0x0, 0x0, 0x0, 0x0,
+		0x4, 0x0, 0x20, 0x2,
+		0x10, 0x10, 0x0, 0x2,
+	}
+	var packet TransportLayerCC
+	if err := packet.Unmarshal(data); err != nil {
+		t.Fatalf("Unmarshal err: %v", err)
+	}
+	if got, want := len(packet.PacketChunks), 2; got != want {
+		t.Fatalf("PacketChunks: got = %v, want %v", got, want)
+	}
+	if got, want := len(packet.RecvDeltas), 2; got != want {
+		t.Fatalf("RecvDeltas: got = %v, want %v", got, want)
+	}
+}
+
+func TestTransportLayerCC_UnmarshalTruncatedDeltas(t *testing.T) {
+	for _, test := range []struct {
+		Name string
+		Data []byte
+	}{
+		{
+			// Two statuses: a small delta followed by a large delta. Only one
+			// of the two large-delta bytes fits in the packet.
+			Name: "large delta truncated",
+			Data: []byte{
+				0xaf, 0xcd, 0x0, 0x5,
+				0xfa, 0x17, 0xfa, 0x17,
+				0x43, 0x3, 0x2f, 0xa0,
+				0x0, 0x99, 0x0, 0x2,
+				0x3d, 0xe8, 0x2, 0x17,
+				0xd8, 0x0, 0x10, 0x9,
+			},
+		},
+		{
+			// Two small deltas announced, only one byte supplied.
+			Name: "small delta truncated",
+			Data: []byte{
+				0xaf, 0xcd, 0x0, 0x5,
+				0xfa, 0x17, 0xfa, 0x17,
+				0x43, 0x3, 0x2f, 0xa0,
+				0x0, 0x99, 0x0, 0x3,
+				0x3d, 0xe8, 0x2, 0x17,
+				0x20, 0x3, 0x94, 0x1,
+			},
+		},
+	} {
+		test := test
+		t.Run(test.Name, func(t *testing.T) {
+			var packet TransportLayerCC
+			err := packet.Unmarshal(test.Data)
+			if !errors.Is(err, errPacketTooShort) {
+				t.Fatalf("Unmarshal %q: got err = %v, want %v", test.Name, err, errPacketTooShort)
+			}
+		})
 	}
 }
