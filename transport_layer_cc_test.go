@@ -1243,3 +1243,123 @@ func TestTransportLayerCC_UnmarshalUnusedVector(t *testing.T) {
 		}
 	}
 }
+
+func deltaExceedLimitPacket(deltas ...*RecvDelta) TransportLayerCC {
+	return TransportLayerCC{
+		Header: Header{
+			Padding: true,
+			Count:   FormatTCC,
+			Type:    TypeTransportSpecificFeedback,
+			Length:  6,
+		},
+		SenderSSRC:         4195875351,
+		MediaSSRC:          1124282272,
+		BaseSequenceNumber: 153,
+		PacketStatusCount:  uint16(len(deltas)), //nolint:gosec // test uses few deltas
+		ReferenceTime:      4057090,
+		FbPktCount:         23,
+		PacketChunks: []PacketStatusChunk{
+			&StatusVectorChunk{
+				Type:       TypeTCCStatusVectorChunk,
+				SymbolSize: TypeTCCSymbolSizeTwoBit,
+				SymbolList: []uint16{
+					TypeTCCPacketReceivedSmallDelta,
+					TypeTCCPacketReceivedLargeDelta,
+					TypeTCCPacketNotReceived,
+					TypeTCCPacketNotReceived,
+					TypeTCCPacketNotReceived,
+					TypeTCCPacketNotReceived,
+					TypeTCCPacketNotReceived,
+				},
+			},
+		},
+		RecvDeltas: deltas,
+	}
+}
+
+func TestTransportLayerCC_MarshalDeltaExceedLimit(t *testing.T) {
+	for _, test := range []struct {
+		Name  string
+		Delta *RecvDelta
+	}{
+		{
+			Name:  "small delta below limit",
+			Delta: &RecvDelta{Type: TypeTCCPacketReceivedSmallDelta, Delta: -250},
+		},
+		{
+			Name:  "small delta above limit",
+			Delta: &RecvDelta{Type: TypeTCCPacketReceivedSmallDelta, Delta: 64000},
+		},
+		{
+			Name:  "large delta below limit",
+			Delta: &RecvDelta{Type: TypeTCCPacketReceivedLargeDelta, Delta: -32769 * 250},
+		},
+		{
+			Name:  "large delta above limit",
+			Delta: &RecvDelta{Type: TypeTCCPacketReceivedLargeDelta, Delta: 32768 * 250},
+		},
+	} {
+		packet := deltaExceedLimitPacket(test.Delta)
+		data, err := packet.Marshal()
+		assert.ErrorIsf(t, err, errDeltaExceedLimit, "Marshal %q", test.Name)
+		assert.Nilf(t, data, "Marshal %q must not return a partial packet", test.Name)
+	}
+}
+
+func TestTransportLayerCC_MarshalDeltaExceedLimitPosition(t *testing.T) {
+	validSmall := func() *RecvDelta { return &RecvDelta{Type: TypeTCCPacketReceivedSmallDelta, Delta: 250} }
+	invalidSmall := func() *RecvDelta { return &RecvDelta{Type: TypeTCCPacketReceivedSmallDelta, Delta: 64000} }
+
+	for _, test := range []struct {
+		Name   string
+		Deltas []*RecvDelta
+	}{
+		{Name: "error on first delta", Deltas: []*RecvDelta{invalidSmall(), validSmall(), validSmall()}},
+		{Name: "error on middle delta", Deltas: []*RecvDelta{validSmall(), invalidSmall(), validSmall()}},
+		{Name: "error on last delta", Deltas: []*RecvDelta{validSmall(), validSmall(), invalidSmall()}},
+	} {
+		packet := deltaExceedLimitPacket(test.Deltas...)
+		data, err := packet.Marshal()
+		assert.ErrorIsf(t, err, errDeltaExceedLimit, "Marshal %q", test.Name)
+		assert.Nilf(t, data, "Marshal %q must not return a partial packet", test.Name)
+	}
+}
+
+func TestTransportLayerCC_MarshalDeltaExceedLimitRemarshal(t *testing.T) {
+	packet := deltaExceedLimitPacket(
+		&RecvDelta{Type: TypeTCCPacketReceivedSmallDelta, Delta: 64000},
+		&RecvDelta{Type: TypeTCCPacketReceivedLargeDelta, Delta: -2500},
+	)
+
+	data, err := packet.Marshal()
+	assert.ErrorIs(t, err, errDeltaExceedLimit)
+	assert.Nil(t, data)
+
+	// the packet must stay usable after a failed Marshal
+	packet.RecvDeltas[0].Delta = 25000
+	data, err = packet.Marshal()
+	assert.NoError(t, err)
+	assert.NotNil(t, data)
+
+	var decoded TransportLayerCC
+	assert.NoError(t, decoded.Unmarshal(data))
+	assert.Equal(t, packet.PacketStatusCount, decoded.PacketStatusCount)
+	assert.Equal(t, packet.RecvDeltas, decoded.RecvDeltas)
+}
+
+func TestTransportLayerCC_MarshalRoundTripMixedDeltas(t *testing.T) {
+	packet := deltaExceedLimitPacket(
+		&RecvDelta{Type: TypeTCCPacketReceivedSmallDelta, Delta: 25000},
+		&RecvDelta{Type: TypeTCCPacketReceivedLargeDelta, Delta: -2500},
+	)
+
+	data, err := packet.Marshal()
+	assert.NoError(t, err)
+	// 4 (header) + 16 (fixed fields) + 2 (one chunk) + 1 (small delta) + 2 (large delta) = 25, padded to 28
+	assert.Len(t, data, 28)
+
+	var decoded TransportLayerCC
+	assert.NoError(t, decoded.Unmarshal(data))
+	assert.Equal(t, packet.PacketStatusCount, decoded.PacketStatusCount)
+	assert.Equal(t, packet.RecvDeltas, decoded.RecvDeltas)
+}
