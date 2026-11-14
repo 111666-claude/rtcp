@@ -21,13 +21,13 @@ func TestSliceLossIndicationUnmarshal(t *testing.T) {
 		{
 			Name: "valid",
 			Data: []byte{
-				// SliceLossIndication
-				0x82, 0xcd, 0x0, 0x3,
+				// SliceLossIndication (v=2, FMT=2, PT=PSFB=206, len=3)
+				0x82, 0xce, 0x0, 0x3,
 				// sender=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// media=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
-				// nack 0xAAAA, 0x5555
+				// sli First=0xAAA, Number=0, Picture=0x2C
 				0x55, 0x50, 0x00, 0x2C,
 			},
 			Want: SliceLossIndication{
@@ -39,10 +39,30 @@ func TestSliceLossIndicationUnmarshal(t *testing.T) {
 		{
 			Name: "short report",
 			Data: []byte{
-				0x81, 0xcd, 0x0, 0x2,
+				0x82, 0xce, 0x0, 0x2,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// report ends early
+			},
+			WantError: errPacketTooShort,
+		},
+		{
+			Name: "missing media ssrc",
+			Data: []byte{
+				// header declares only sender+media SSRCs (len=2) but
+				// the packet ends after the sender SSRC
+				0x82, 0xce, 0x0, 0x2,
+				0x90, 0x2f, 0x9e, 0x2e,
+			},
+			WantError: errPacketTooShort,
+		},
+		{
+			Name: "declared length too small",
+			Data: []byte{
+				// len=1 only covers the sender SSRC, no room for media SSRC
+				0x82, 0xce, 0x0, 0x1,
+				0x90, 0x2f, 0x9e, 0x2e,
+				0x90, 0x2f, 0x9e, 0x2e,
 			},
 			WantError: errPacketTooShort,
 		},
@@ -69,6 +89,36 @@ func TestSliceLossIndicationUnmarshal(t *testing.T) {
 			WantError: errWrongType,
 		},
 		{
+			Name: "wrong fmt",
+			Data: []byte{
+				// v=2, FMT=1 (PLI), PT=PSFB=206, len=2
+				0x81, 0xce, 0x0, 0x2,
+				0x90, 0x2f, 0x9e, 0x2e,
+				0x90, 0x2f, 0x9e, 0x2e,
+			},
+			WantError: errWrongType,
+		},
+		{
+			Name: "transport specific feedback type",
+			Data: []byte{
+				// v=2, FMT=2, PT=RTPFB=205, len=2: SLI is PSFB, not RTPFB
+				0x82, 0xcd, 0x0, 0x2,
+				0x90, 0x2f, 0x9e, 0x2e,
+				0x90, 0x2f, 0x9e, 0x2e,
+			},
+			WantError: errWrongType,
+		},
+		{
+			Name: "bad version",
+			Data: []byte{
+				// v=1, FMT=2, PT=PSFB=206, len=2
+				0x42, 0xce, 0x0, 0x2,
+				0x90, 0x2f, 0x9e, 0x2e,
+				0x90, 0x2f, 0x9e, 0x2e,
+			},
+			WantError: errBadVersion,
+		},
+		{
 			Name:      "nil",
 			Data:      nil,
 			WantError: errPacketTooShort,
@@ -78,6 +128,9 @@ func TestSliceLossIndicationUnmarshal(t *testing.T) {
 		err := sli.Unmarshal(test.Data)
 		assert.ErrorIsf(t, err, test.WantError, "Unmarshal %q", test.Name)
 		if err != nil {
+			// a failed Unmarshal must not leave partial state behind
+			assert.Equalf(t, SliceLossIndication{}, sli, "Unmarshal %q modified receiver on error", test.Name)
+
 			continue
 		}
 
@@ -99,6 +152,14 @@ func TestSliceLossIndicationRoundTrip(t *testing.T) {
 				SLI:        []SLIEntry{{1, 0xAA, 0x1F}, {1034, 0x05, 0x6}},
 			},
 		},
+		{
+			Name: "no entries",
+			Report: SliceLossIndication{
+				SenderSSRC: 0x902f9e2e,
+				MediaSSRC:  0xbc5e9a40,
+				SLI:        []SLIEntry{},
+			},
+		},
 	} {
 		data, err := test.Report.Marshal()
 		assert.ErrorIsf(t, err, test.WantError, "Marshal %q", test.Name)
@@ -106,16 +167,40 @@ func TestSliceLossIndicationRoundTrip(t *testing.T) {
 			continue
 		}
 
+		// the marshaled packet must be announced as Payload-Specific Feedback (RFC 4585)
+		assert.Equalf(t, byte(TypePayloadSpecificFeedback), data[1], "Marshal %q packet type", test.Name)
+		assert.Equalf(t, test.Report.MarshalSize(), len(data), "MarshalSize %q", test.Name)
+		assert.Equalf(t, test.Report.Header().Length, (uint16(len(data))/4)-1, "Header length %q", test.Name)
+
 		var decoded SliceLossIndication
 		assert.NoErrorf(t, decoded.Unmarshal(data), "Unmarshal %q", test.Name)
 		assert.Equalf(t, test.Report, decoded, "%q sli round trip mismatch", test.Name)
 	}
 }
 
+func TestSliceLossIndicationDispatch(t *testing.T) {
+	report := SliceLossIndication{
+		SenderSSRC: 0x902f9e2e,
+		MediaSSRC:  0x902f9e2e,
+		SLI:        []SLIEntry{{1, 0xAA, 0x1F}},
+	}
+
+	data, err := report.Marshal()
+	assert.NoError(t, err)
+
+	packets, err := Unmarshal(data)
+	assert.NoError(t, err)
+	assert.Len(t, packets, 1)
+
+	decoded, ok := packets[0].(*SliceLossIndication)
+	assert.True(t, ok, "expected Unmarshal to dispatch to *SliceLossIndication, got %T", packets[0])
+	assert.Equal(t, report, *decoded)
+}
+
 func TestSliceLossIndicationUnmarshalMaxLength(t *testing.T) {
 	rawPacket := make([]byte, 4*(0xFFFF+1))
 	rawPacket[0] = 0x82
-	rawPacket[1] = 0xcd
+	rawPacket[1] = 0xce
 	rawPacket[2] = 0xff
 	rawPacket[3] = 0xff
 

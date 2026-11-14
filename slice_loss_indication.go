@@ -63,7 +63,7 @@ func (p SliceLossIndication) Marshal() ([]byte, error) {
 
 // Unmarshal decodes the SliceLossIndication from binary.
 func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
-	if len(rawPacket) < (headerLength + ssrcLength) {
+	if len(rawPacket) < (headerLength + sliOffset) {
 		return errPacketTooShort
 	}
 
@@ -72,24 +72,34 @@ func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
+	if header.Type != TypePayloadSpecificFeedback || header.Count != FormatSLI {
+		return errWrongType
+	}
+
+	// The packet must at least contain the sender and media SSRCs.
+	if header.Length < sliLength {
+		return errPacketTooShort
+	}
+
 	if len(rawPacket) < (headerLength + 4*int(header.Length)) {
 		return errPacketTooShort
 	}
 
-	if header.Type != TypeTransportSpecificFeedback || header.Count != FormatSLI {
-		return errWrongType
-	}
-
-	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
-	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
+	senderSSRC := binary.BigEndian.Uint32(rawPacket[headerLength:])
+	mediaSSRC := binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
+	sli := make([]SLIEntry, 0, header.Length-sliLength)
 	for i := headerLength + sliOffset; i < (headerLength + 4*int(header.Length)); i += 4 {
-		sli := binary.BigEndian.Uint32(rawPacket[i:])
-		p.SLI = append(p.SLI, SLIEntry{
-			First:   uint16((sli >> 19) & 0x1FFF), //nolint:gosec // G115
-			Number:  uint16((sli >> 6) & 0x1FFF),  //nolint:gosec // G115
-			Picture: uint8(sli & 0x3F),            //nolint:gosec // G115
+		entry := binary.BigEndian.Uint32(rawPacket[i:])
+		sli = append(sli, SLIEntry{
+			First:   uint16((entry >> 19) & 0x1FFF), //nolint:gosec // G115
+			Number:  uint16((entry >> 6) & 0x1FFF),  //nolint:gosec // G115
+			Picture: uint8(entry & 0x3F),            //nolint:gosec // G115
 		})
 	}
+
+	p.SenderSSRC = senderSSRC
+	p.MediaSSRC = mediaSSRC
+	p.SLI = sli
 
 	return nil
 }
@@ -103,7 +113,7 @@ func (p *SliceLossIndication) MarshalSize() int {
 func (p *SliceLossIndication) Header() Header {
 	return Header{
 		Count:  FormatSLI,
-		Type:   TypeTransportSpecificFeedback,
+		Type:   TypePayloadSpecificFeedback,
 		Length: uint16((p.MarshalSize() / 4) - 1), //nolint:gosec // G115
 	}
 }
