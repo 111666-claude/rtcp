@@ -188,9 +188,10 @@ func (p *ReceiverEstimatedMaximumBitrate) Unmarshal(buf []byte) (err error) {
 		return fmt.Errorf("%w expected(206) actual(%d)", errWrongPayloadType, buf[1])
 	}
 
-	// length is the number of 32-bit words, minus 1
+	// length is the number of 32-bit words, minus 1. Widen before the
+	// increment and multiplication to avoid uint16 wraparound.
 	length := binary.BigEndian.Uint16(buf[2:4])
-	size := int((length + 1) * 4)
+	size := packetLength(length)
 
 	// There's not way this could be legit
 	if size < 20 {

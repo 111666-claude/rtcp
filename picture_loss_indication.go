@@ -61,6 +61,10 @@ func (p *PictureLossIndication) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
+	if err := checkPacketLength(rawPacket, h.Length); err != nil {
+		return err
+	}
+
 	if h.Type != TypePayloadSpecificFeedback || h.Count != FormatPLI {
 		return errWrongType
 	}

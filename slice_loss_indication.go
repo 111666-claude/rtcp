@@ -72,17 +72,18 @@ func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
-	if len(rawPacket) < (headerLength + int(4*header.Length)) {
-		return errPacketTooShort
+	if err := checkPacketLength(rawPacket, header.Length); err != nil {
+		return err
 	}
 
 	if header.Type != TypeTransportSpecificFeedback || header.Count != FormatSLI {
 		return errWrongType
 	}
 
+	bodyLength := int(header.Length) * 4
 	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
 	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
-	for i := headerLength + sliOffset; i < (headerLength + int(header.Length*4)); i += 4 {
+	for i := headerLength + sliOffset; i < (headerLength + bodyLength); i += 4 {
 		sli := binary.BigEndian.Uint32(rawPacket[i:])
 		p.SLI = append(p.SLI, SLIEntry{
 			First:   uint16((sli >> 19) & 0x1FFF), //nolint:gosec // G115

@@ -60,8 +60,8 @@ func (p *FullIntraRequest) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
-	if len(rawPacket) < (headerLength + int(4*header.Length)) {
-		return errPacketTooShort
+	if err := checkPacketLength(rawPacket, header.Length); err != nil {
+		return err
 	}
 
 	if header.Type != TypePayloadSpecificFeedback || header.Count != FormatFIR {
@@ -69,13 +69,14 @@ func (p *FullIntraRequest) Unmarshal(rawPacket []byte) error {
 	}
 
 	// The FCI field MUST contain one or more FIR entries
-	if 4*header.Length-firOffset <= 0 || (4*header.Length)%8 != 0 {
+	bodyLength := int(header.Length) * 4
+	if bodyLength-firOffset <= 0 || bodyLength%8 != 0 {
 		return errBadLength
 	}
 
 	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
 	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
-	for i := headerLength + firOffset; i < (headerLength + int(header.Length*4)); i += 8 {
+	for i := headerLength + firOffset; i < (headerLength + bodyLength); i += 8 {
 		p.FIR = append(p.FIR, FIREntry{
 			binary.BigEndian.Uint32(rawPacket[i:]),
 			rawPacket[i+4],

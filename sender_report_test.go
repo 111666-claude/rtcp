@@ -27,8 +27,8 @@ func TestSenderReportUnmarshal(t *testing.T) {
 		{
 			Name: "valid",
 			Data: []byte{
-				// v=2, p=0, count=1, SR, len=7
-				0x81, 0xc8, 0x0, 0x7,
+				// v=2, p=0, count=1, SR, len=7 (32 bytes total)
+				0x81, 0xc8, 0x0, 0xc,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// ntp=0xda8bd1fcdddda05a
@@ -73,8 +73,8 @@ func TestSenderReportUnmarshal(t *testing.T) {
 		{
 			Name: "wrong type",
 			Data: []byte{
-				// v=2, p=0, count=1, RR, len=7
-				0x81, 0xc9, 0x0, 0x7,
+				// v=2, p=0, count=1, RR, len=7 (32 bytes total)
+				0x81, 0xc9, 0x0, 0xc,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// ntp=0xda8bd1fcdddda05a
@@ -104,8 +104,8 @@ func TestSenderReportUnmarshal(t *testing.T) {
 		{
 			Name: "bad count in header",
 			Data: []byte{
-				// v=2, p=0, count=1, SR, len=7
-				0x82, 0xc8, 0x0, 0x7,
+				// v=2, p=0, count=2, SR, len=7 (32 bytes total)
+				0x82, 0xc8, 0x0, 0xc,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// ntp=0xda8bd1fcdddda05a
@@ -135,8 +135,8 @@ func TestSenderReportUnmarshal(t *testing.T) {
 		{
 			Name: "with extension", // issue #447
 			Data: []byte{
-				// v=2, p=0, count=0, SR, len=6
-				0x80, 0xc8, 0x0, 0x6,
+				// v=2, p=0, count=0, SR, len=13 (56 bytes total)
+				0x80, 0xc8, 0x0, 0xd,
 				// ssrc=0x2b7ec0c5
 				0x2b, 0x7e, 0xc0, 0xc5,
 				// ntp=0xe020a2a952a53fc0

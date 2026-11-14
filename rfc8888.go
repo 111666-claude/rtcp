@@ -145,7 +145,7 @@ func (b CCFeedbackReport) Marshal() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	length := 4 * (header.Length + 1)
+	length := packetLength(header.Length)
 	buf := make([]byte, length)
 	copy(buf[:headerLength], headerBuf)
 	binary.BigEndian.PutUint32(buf[headerLength:], b.SenderSSRC)
@@ -186,6 +186,9 @@ func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
 
 	var h Header
 	if err := h.Unmarshal(rawPacket); err != nil {
+		return err
+	}
+	if err := checkPacketLength(rawPacket, h.Length); err != nil {
 		return err
 	}
 	if h.Type != TypeTransportSpecificFeedback {

@@ -27,8 +27,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "no chunks",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=8
-				0x80, 0xca, 0x00, 0x04,
+				// v=2, p=0, count=0, SDES, len=0 (4 bytes total)
+				0x80, 0xca, 0x00, 0x00,
 			},
 			Want: SourceDescription{
 				Chunks: nil,
@@ -37,8 +37,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "missing type",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=8
-				0x81, 0xca, 0x00, 0x08,
+				// v=2, p=0, count=1, SDES, len=1 (8 bytes total)
+				0x81, 0xca, 0x00, 0x01,
 				// ssrc=0x00000000
 				0x00, 0x00, 0x00, 0x00,
 			},
@@ -47,8 +47,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "bad cname length",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=10
-				0x81, 0xca, 0x00, 0x0a,
+				// v=2, p=0, count=1, SDES, len=2 (declared 12 bytes, 10 present)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x00000000
 				0x00, 0x00, 0x00, 0x00,
 				// CNAME, len = 1
@@ -59,8 +59,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "short cname",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=9
-				0x81, 0xca, 0x00, 0x09,
+				// v=2, p=0, count=1, SDES, len=2 (declared 12 bytes, 9 present)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x00000000
 				0x00, 0x00, 0x00, 0x00,
 				// CNAME, Missing length
@@ -71,8 +71,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "no end",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=11
-				0x81, 0xca, 0x00, 0x0b,
+				// v=2, p=0, count=1, SDES, len=2 (declared 12 bytes, 11 present)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x00000000
 				0x00, 0x00, 0x00, 0x00,
 				// CNAME, len=1, content=A
@@ -84,8 +84,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "bad octet count",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=10
-				0x81, 0xca, 0x00, 0x0a,
+				// v=2, p=0, count=1, SDES, len=2 (declared 12 bytes, 10 present)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x00000000
 				0x00, 0x00, 0x00, 0x00,
 				// CNAME, len=1
@@ -96,8 +96,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "zero item chunk",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=12
-				0x81, 0xca, 0x00, 0x0c,
+				// v=2, p=0, count=1, SDES, len=2 (12 bytes total)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x01020304
 				0x01, 0x02, 0x03, 0x04,
 				// END + padding
@@ -113,8 +113,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "wrong type",
 			Data: []byte{
-				// v=2, p=0, count=1, SR, len=12
-				0x81, 0xc8, 0x00, 0x0c,
+				// v=2, p=0, count=1, SR, len=2 (12 bytes total)
+				0x81, 0xc8, 0x00, 0x02,
 				// ssrc=0x01020304
 				0x01, 0x02, 0x03, 0x04,
 				// END + padding
@@ -125,16 +125,16 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "bad count in header",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=12
-				0x81, 0xca, 0x00, 0x0c,
+				// v=2, p=0, count=1, SDES, len=0 (4 bytes present, chunks missing)
+				0x81, 0xca, 0x00, 0x00,
 			},
 			WantError: errInvalidHeader,
 		},
 		{
 			Name: "empty string",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=12
-				0x81, 0xca, 0x00, 0x0c,
+				// v=2, p=0, count=1, SDES, len=2 (12 bytes total)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x01020304
 				0x01, 0x02, 0x03, 0x04,
 				// CNAME, len=0
@@ -147,8 +147,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "two items",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=16
-				0x81, 0xca, 0x00, 0x10,
+				// v=2, p=0, count=1, SDES, len=3 (16 bytes total)
+				0x81, 0xca, 0x00, 0x03,
 				// ssrc=0x10000000
 				0x10, 0x00, 0x00, 0x00,
 				// CNAME, len=1, content=A
@@ -179,8 +179,8 @@ func TestSourceDescriptionUnmarshal(t *testing.T) {
 		{
 			Name: "two chunks",
 			Data: []byte{
-				// v=2, p=0, count=2, SDES, len=24
-				0x82, 0xca, 0x00, 0x18,
+				// v=2, p=0, count=2, SDES, len=5 (24 bytes total)
+				0x82, 0xca, 0x00, 0x05,
 				// ssrc=0x01020304
 				0x01, 0x02, 0x03, 0x04,
 				// Chunk 1

@@ -426,17 +426,24 @@ func TestCCFeedbackReportUnmarshalMarshal(t *testing.T) {
 }
 
 func TestCCFeedbackOverflow(t *testing.T) {
-	p := &CCFeedbackReport{}
-	err := p.Unmarshal(append([]byte{
-		// Header
-		0b10000000, // V = 2
-		205,        // h.Type = TypeTransportSpecificFeedback
-		0, 0,       // h.Length (unused)
-		// SSRC
+	// A correctly framed packet whose report block claims far more metric
+	// blocks than the buffer holds must fail on the num_reports check,
+	// without overrunning the slice or reading into another packet.
+	rawPacket := []byte{
+		// Header: V=2, PT=205, len=5 (24 bytes total)
+		0b10000000, 205, 0x00, 0x05,
+		// SSRC of sender
 		0, 0, 0, 0,
-		// CCFeedbackReportBlock
-		0, 0, 0, 0, 0, 0,
-		0x7F, 0xFB, // numReportsField
-	}, bytes.Repeat([]byte{0, 0}, 0x7FFF)...))
-	assert.ErrorIs(t, err, errReportBlockLength)
+		// Report block: media SSRC, begin seq, num reports = 0x7FFB
+		0, 0, 0, 0,
+		0, 0,
+		0x7F, 0xFB,
+		// Only two metric blocks are present
+		0, 0,
+		0, 0,
+		// Report timestamp
+		0, 0, 0, 0,
+	}
+	err := (&CCFeedbackReport{}).Unmarshal(rawPacket)
+	assert.ErrorIs(t, err, errIncorrectNumReports)
 }

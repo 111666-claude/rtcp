@@ -132,8 +132,8 @@ func (p *TransportLayerNack) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
-	if len(rawPacket) < (headerLength + int(4*header.Length)) {
-		return errPacketTooShort
+	if err := checkPacketLength(rawPacket, header.Length); err != nil {
+		return err
 	}
 
 	if header.Type != TypeTransportSpecificFeedback || header.Count != FormatTLN {
@@ -141,13 +141,14 @@ func (p *TransportLayerNack) Unmarshal(rawPacket []byte) error {
 	}
 
 	// The FCI field MUST contain at least one and MAY contain more than one Generic NACK
-	if 4*header.Length <= nackOffset {
+	bodyLength := int(header.Length) * 4
+	if bodyLength <= nackOffset {
 		return errBadLength
 	}
 
 	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
 	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
-	for i := headerLength + nackOffset; i < (headerLength + int(header.Length*4)); i += 4 {
+	for i := headerLength + nackOffset; i < (headerLength + bodyLength); i += 4 {
 		p.Nacks = append(p.Nacks, NackPair{
 			binary.BigEndian.Uint16(rawPacket[i:]),
 			PacketBitmap(binary.BigEndian.Uint16(rawPacket[i+2:])),

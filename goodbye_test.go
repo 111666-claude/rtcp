@@ -22,8 +22,8 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "valid",
 			Data: []byte{
-				// v=2, p=0, count=1, BYE, len=12
-				0x81, 0xcb, 0x00, 0x0c,
+				// v=2, p=0, count=1, BYE, len=2 (12 bytes total)
+				0x81, 0xcb, 0x00, 0x02,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// len=3, text=FOO
@@ -37,8 +37,8 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "invalid octet count",
 			Data: []byte{
-				// v=2, p=0, count=1, BYE, len=12
-				0x81, 0xcb, 0x00, 0x0c,
+				// v=2, p=0, count=1, BYE, len=2 (12 bytes total)
+				0x81, 0xcb, 0x00, 0x02,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// len=4, text=FOO
@@ -49,8 +49,8 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "wrong type",
 			Data: []byte{
-				// v=2, p=0, count=1, SDES, len=12
-				0x81, 0xca, 0x00, 0x0c,
+				// v=2, p=0, count=1, SDES, len=2 (12 bytes total)
+				0x81, 0xca, 0x00, 0x02,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// len=3, text=FOO
@@ -61,8 +61,8 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "short reason",
 			Data: []byte{
-				// v=2, p=0, count=1, BYE, len=12
-				0x81, 0xcb, 0x00, 0x0c,
+				// v=2, p=0, count=1, BYE, len=2 (12 bytes total)
+				0x81, 0xcb, 0x00, 0x02,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 				// len=3, text=F + padding
@@ -76,7 +76,7 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "not byte aligned",
 			Data: []byte{
-				// v=2, p=0, count=1, BYE, len=10
+				// v=2, p=0, count=1, BYE, len=10 (declared 44 bytes, only 10 present)
 				0x81, 0xcb, 0x00, 0x0a,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
@@ -88,8 +88,8 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "bad count in header",
 			Data: []byte{
-				// v=2, p=0, count=2, BYE, len=8
-				0x82, 0xcb, 0x00, 0x0c,
+				// v=2, p=0, count=2, BYE, len=1 (8 bytes total)
+				0x82, 0xcb, 0x00, 0x01,
 				// ssrc=0x902f9e2e
 				0x90, 0x2f, 0x9e, 0x2e,
 			},
@@ -98,8 +98,8 @@ func TestGoodbyeUnmarshal(t *testing.T) {
 		{
 			Name: "empty packet",
 			Data: []byte{
-				// v=2, p=0, count=0, BYE, len=4
-				0x80, 0xcb, 0x00, 0x04,
+				// v=2, p=0, count=0, BYE, len=0 (4 bytes total)
+				0x80, 0xcb, 0x00, 0x00,
 			},
 			Want: Goodbye{
 				Sources: []uint32{},

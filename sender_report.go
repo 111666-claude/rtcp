@@ -180,6 +180,10 @@ func (r *SenderReport) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
+	if err := checkPacketLength(rawPacket, header.Length); err != nil {
+		return err
+	}
+
 	if header.Type != TypeSenderReport {
 		return errWrongType
 	}

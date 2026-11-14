@@ -461,7 +461,7 @@ func (t TransportLayerCC) Marshal() ([]byte, error) {
 // Unmarshal ..
 //
 //nolint:gocognit,cyclop
-func (t *TransportLayerCC) Unmarshal(rawPacket []byte) error {
+func (t *TransportLayerCC) Unmarshal(rawPacket []byte) (err error) {
 	if len(rawPacket) < (headerLength + ssrcLength) {
 		return errPacketTooShort
 	}
@@ -470,15 +470,24 @@ func (t *TransportLayerCC) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
-	// https://tools.ietf.org/html/rfc4585#page-33
-	// header's length + payload's length
-	totalLength := 4 * (t.Header.Length + 1)
+	// A failed decode must not keep partially parsed chunks or deltas.
+	defer func() {
+		if err != nil {
+			t.PacketChunks = nil
+			t.RecvDeltas = nil
+		}
+	}()
 
-	if totalLength < headerLength+packetChunkOffset {
-		return errPacketTooShort
+	if err = checkPacketLength(rawPacket, t.Header.Length); err != nil {
+		return err
 	}
 
-	if len(rawPacket) < int(totalLength) {
+	// https://tools.ietf.org/html/rfc4585#page-33
+	// header's length + payload's length. Use int arithmetic so the
+	// increment of the uint16 Length field cannot wrap near 0xffff.
+	totalLength := packetLength(t.Header.Length)
+
+	if totalLength < headerLength+packetChunkOffset {
 		return errPacketTooShort
 	}
 
@@ -493,9 +502,9 @@ func (t *TransportLayerCC) Unmarshal(rawPacket []byte) error {
 	t.ReferenceTime = get24BitsFromBytes(rawPacket[headerLength+referenceTimeOffset : headerLength+referenceTimeOffset+3])
 	t.FbPktCount = rawPacket[headerLength+fbPktCountOffset]
 
-	packetStatusPos := uint16(headerLength + packetChunkOffset)
-	var processedPacketNum uint16
-	for processedPacketNum < t.PacketStatusCount {
+	packetStatusPos := headerLength + packetChunkOffset
+	var processedPacketNum int
+	for processedPacketNum < int(t.PacketStatusCount) {
 		if packetStatusPos+packetStatusChunkLength >= totalLength {
 			return errPacketTooShort
 		}
@@ -510,7 +519,7 @@ func (t *TransportLayerCC) Unmarshal(rawPacket []byte) error {
 				return err
 			}
 
-			packetNumberToProcess := localMin(t.PacketStatusCount-processedPacketNum, packetStatus.RunLength)
+			packetNumberToProcess := localMin(int(t.PacketStatusCount)-processedPacketNum, int(packetStatus.RunLength))
 			if packetStatus.PacketStatusSymbol == TypeTCCPacketReceivedSmallDelta ||
 				packetStatus.PacketStatusSymbol == TypeTCCPacketReceivedLargeDelta {
 				for range packetNumberToProcess {
@@ -540,7 +549,7 @@ func (t *TransportLayerCC) Unmarshal(rawPacket []byte) error {
 					}
 				}
 			}
-			processedPacketNum += uint16(len(packetStatus.SymbolList)) //nolint:gosec // G115
+			processedPacketNum += len(packetStatus.SymbolList)
 		}
 		packetStatusPos += packetStatusChunkLength
 		t.PacketChunks = append(t.PacketChunks, iPacketStatus)
@@ -578,7 +587,7 @@ func (t TransportLayerCC) DestinationSSRC() []uint32 {
 	return []uint32{t.MediaSSRC}
 }
 
-func localMin(x, y uint16) uint16 {
+func localMin(x, y int) int {
 	if x < y {
 		return x
 	}

@@ -62,6 +62,10 @@ func (p *RapidResynchronizationRequest) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
+	if err := checkPacketLength(rawPacket, h.Length); err != nil {
+		return err
+	}
+
 	if h.Type != TypeTransportSpecificFeedback || h.Count != FormatRRR {
 		return errWrongType
 	}

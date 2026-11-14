@@ -68,10 +68,16 @@ func unmarshal(rawData []byte) (packet Packet, bytesprocessed int, err error) {
 		return nil, 0, err
 	}
 
-	bytesprocessed = int(header.Length+1) * 4
+	// Compute the declared packet size with int-width arithmetic before
+	// adding one and multiplying by four to avoid uint16 wraparound for
+	// values near 0xffff. The result is always at least headerLength, so
+	// the loop can never get stuck.
+	bytesprocessed = packetLength(header.Length)
 	if bytesprocessed > len(rawData) {
 		return nil, 0, errPacketTooShort
 	}
+	// Hand the decoder exactly the bytes covered by this packet's
+	// Header.Length, never the trailing bytes of the next compound packet.
 	inPacket := rawData[:bytesprocessed]
 
 	switch header.Type {

@@ -607,6 +607,9 @@ func (x *ExtendedReport) Unmarshal(b []byte) error {
 	if err := header.Unmarshal(b); err != nil {
 		return err
 	}
+	if err := checkPacketLength(b, header.Length); err != nil {
+		return err
+	}
 	if header.Type != TypeExtendedReport {
 		return errWrongType
 	}

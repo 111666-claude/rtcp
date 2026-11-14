@@ -65,6 +65,35 @@ func (p PacketType) String() string {
 
 const rtpVersion = 2
 
+// maxPacketLength is the largest RTCP packet size expressible by the
+// 16-bit Header.Length field: (0xffff + 1) * 4 bytes.
+const maxPacketLength = (1 << 16) * 4
+
+// packetLength returns the total size in bytes of the RTCP packet described
+// by length, where length is the Header.Length value (32-bit words minus one).
+// The conversion to int happens before the increment and multiplication so
+// that 16-bit intermediates cannot wrap and produce an undersized result.
+func packetLength(length uint16) int {
+	return (int(length) + 1) * 4
+}
+
+// checkPacketLength verifies that rawPacket is exactly as large as the size
+// declared by its Header.Length field. The declared length is always a
+// multiple of four bytes, so an undersized declaration (including one that
+// would make the input non 32-bit aligned) is rejected as well, and no byte
+// of an adjacent compound packet can ever be treated as part of this one.
+func checkPacketLength(rawPacket []byte, length uint16) error {
+	declared := packetLength(length)
+	if declared > len(rawPacket) {
+		return errPacketTooShort
+	}
+	if declared != len(rawPacket) {
+		return errBadLength
+	}
+
+	return nil
+}
+
 // A Header is the common header shared by all RTCP packets.
 type Header struct {
 	// If the padding bit is set, this individual RTCP packet contains
