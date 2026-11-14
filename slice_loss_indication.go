@@ -63,7 +63,8 @@ func (p SliceLossIndication) Marshal() ([]byte, error) {
 
 // Unmarshal decodes the SliceLossIndication from binary.
 func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
-	if len(rawPacket) < (headerLength + ssrcLength) {
+	// A valid SLI carries the common header and two SSRCs before any FCI.
+	if len(rawPacket) < (headerLength + 2*ssrcLength) {
 		return errPacketTooShort
 	}
 
@@ -72,24 +73,33 @@ func (p *SliceLossIndication) Unmarshal(rawPacket []byte) error {
 		return err
 	}
 
+	if header.Type != TypePayloadSpecificFeedback || header.Count != FormatSLI {
+		return errWrongType
+	}
+
 	if len(rawPacket) < (headerLength + 4*int(header.Length)) {
 		return errPacketTooShort
 	}
 
-	if header.Type != TypeTransportSpecificFeedback || header.Count != FormatSLI {
-		return errWrongType
+	// The declared length must leave room for the sender and media SSRCs.
+	if 4*int(header.Length) < sliOffset {
+		return errBadLength
 	}
 
-	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
-	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
+	// Decode into locals so a malformed packet cannot leave partial state behind.
+	var sliEntries []SLIEntry
 	for i := headerLength + sliOffset; i < (headerLength + 4*int(header.Length)); i += 4 {
 		sli := binary.BigEndian.Uint32(rawPacket[i:])
-		p.SLI = append(p.SLI, SLIEntry{
+		sliEntries = append(sliEntries, SLIEntry{
 			First:   uint16((sli >> 19) & 0x1FFF), //nolint:gosec // G115
 			Number:  uint16((sli >> 6) & 0x1FFF),  //nolint:gosec // G115
 			Picture: uint8(sli & 0x3F),            //nolint:gosec // G115
 		})
 	}
+
+	p.SenderSSRC = binary.BigEndian.Uint32(rawPacket[headerLength:])
+	p.MediaSSRC = binary.BigEndian.Uint32(rawPacket[headerLength+ssrcLength:])
+	p.SLI = sliEntries
 
 	return nil
 }
@@ -103,7 +113,7 @@ func (p *SliceLossIndication) MarshalSize() int {
 func (p *SliceLossIndication) Header() Header {
 	return Header{
 		Count:  FormatSLI,
-		Type:   TypeTransportSpecificFeedback,
+		Type:   TypePayloadSpecificFeedback,
 		Length: uint16((p.MarshalSize() / 4) - 1), //nolint:gosec // G115
 	}
 }
