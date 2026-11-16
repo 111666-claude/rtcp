@@ -40,4 +40,13 @@ var (
 	errAppDefinedDataTooLarge   = errors.New("rtcp: application defined data is too large")
 	errAppDefinedInvalidName    = errors.New("rtcp: application defined name must be 4 ASCII chars")
 	errPacketTooLarge           = errors.New("rtcp: packet is too large to fit in RTCP length field")
+
+	// ErrInvalidNackReorderWait is returned when the NackWindow reorder wait is
+	// not positive.
+	ErrInvalidNackReorderWait = errors.New("rtcp: NACK reorder wait must be greater than zero")
+	// ErrInvalidNackMaxRetries is returned when the NackWindow retry limit is zero.
+	ErrInvalidNackMaxRetries = errors.New("rtcp: NACK max retries must be greater than zero")
+	// ErrInvalidNackWindowLength is returned when the NackWindow length is zero
+	// or larger than half of the 16-bit sequence number space.
+	ErrInvalidNackWindowLength = errors.New("rtcp: NACK window length out of range")
 )
